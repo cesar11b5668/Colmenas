@@ -30,7 +30,7 @@ import java.util.UUID
 import kotlin.math.roundToInt
 
 // A new object per scan lets the same card be read again after an earlier scan.
-data class Scan(val tagId: String? = null, val code: String? = null, val eventId: String = UUID.randomUUID().toString())
+data class Scan(val tagId: String? = null, val code: String? = null, val eventId: String = UUID.randomUUID().toString(), val isNfc: Boolean = tagId != null)
 
 class MainActivity : ComponentActivity() {
     private var nfc: NfcAdapter? = null
@@ -94,7 +94,7 @@ class MainActivity : ComponentActivity() {
                 // A card without readable NDEF can still be identified by its UID.
             } finally { runCatching { ndef.close() } }
         }
-        val event = Scan(nfcTagId(tag.id), code)
+        val event = Scan(nfcTagId(tag.id), code, isNfc = true)
         runOnUiThread { acceptScan(event) }
     }
 }
@@ -107,6 +107,7 @@ fun BeeApp(incoming: Scan?, clear: () -> Unit, scanQr: () -> Unit, hasNfc: Boole
     val scope = rememberCoroutineScope()
     val apiaries by dao.apiaries().collectAsState(initial = emptyList())
     val hives by dao.hives().collectAsState(initial = emptyList())
+    val nfcTags by dao.apiaryNfcTags().collectAsState(initial = emptyList())
     var selectedApiaryId by rememberSaveable { mutableStateOf<Long?>(null) }
     val selectedApiary = apiaries.firstOrNull { it.id == selectedApiaryId }
     var creatingApiaryId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -116,10 +117,11 @@ fun BeeApp(incoming: Scan?, clear: () -> Unit, scanQr: () -> Unit, hasNfc: Boole
     var addApiary by rememberSaveable { mutableStateOf(false) }
     var capturing by rememberSaveable { mutableStateOf(false) }
     var newTagId by rememberSaveable { mutableStateOf<String?>(null) }
-    var linkHiveId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var linkApiaryId by rememberSaveable { mutableStateOf<Long?>(null) }
     val snackbar = remember { SnackbarHostState() }
     fun message(text: String) { scope.launch { snackbar.showSnackbar(text) } }
-    fun closeNewHive() { addHive = false; capturing = false; newTagId = null; creatingApiaryId = null }
+    fun closeNewHive() { addHive = false; creatingApiaryId = null }
+    fun closeNewApiary() { addApiary = false; capturing = false; newTagId = null }
     fun goBack() {
         if (selectedId != null) selectedId = null else selectedApiaryId = null
     }
@@ -129,34 +131,39 @@ fun BeeApp(incoming: Scan?, clear: () -> Unit, scanQr: () -> Unit, hasNfc: Boole
         val event = incoming ?: return@LaunchedEffect
         try {
             if (capturing && event.tagId != null) {
-                val existing = dao.hiveByNfcTagId(event.tagId)
-                if (existing != null && existing.id != linkHiveId) {
-                    snackbar.showSnackbar("Esta tarjeta ya está asociada a ${existing.name}. Usa otra tarjeta.")
-                } else if (addHive) {
+                val existing = dao.apiaryByNfcTagId(event.tagId)
+                if (existing != null && existing.id != linkApiaryId) {
+                    snackbar.showSnackbar("Esta tarjeta ya está asociada al apiario ${existing.name}. Usa otra tarjeta.")
+                } else if (addApiary) {
                     newTagId = event.tagId
                     capturing = false
                 } else {
-                    val hive = hives.firstOrNull { it.id == linkHiveId }
-                    if (hive != null) {
-                        dao.updateHive(hive.copy(nfcTagId = event.tagId))
+                    val apiary = linkApiaryId?.let { dao.apiaryById(it) }
+                    if (apiary != null) {
+                        if (existing == null) dao.addApiaryNfcTag(ApiaryNfcTag(event.tagId, apiary.id))
                         capturing = false
-                        linkHiveId = null
-                        snackbar.showSnackbar("Tarjeta NFC asociada a ${hive.name}")
+                        linkApiaryId = null
+                        snackbar.showSnackbar("Tarjeta NFC asociada al apiario ${apiary.name}")
                     }
                 }
             } else if (capturing) {
                 snackbar.showSnackbar("Acerca una tarjeta NFC para asociarla.")
+            } else if (event.isNfc) {
+                val apiary = event.tagId?.let { dao.apiaryByNfcTagId(it) }
+                    ?: event.code?.let { dao.hiveByCode(it)?.apiaryId }?.let { dao.apiaryById(it) }
+                if (apiary != null) {
+                    selectedId = null
+                    selectedApiaryId = apiary.id
+                } else snackbar.showSnackbar("Tarjeta sin asociar. Agrégala al crear un apiario o desde su ficha.")
             } else {
-                val hive = event.tagId?.let { dao.hiveByNfcTagId(it) }
-                    ?: event.code?.let { dao.hiveByCode(it) }
+                val hive = event.code?.let { dao.hiveByCode(it) }
                 if (hive != null) {
                     selectedApiaryId = hive.apiaryId
                     selectedId = hive.id
-                }
-                else snackbar.showSnackbar("Tarjeta o código sin asociar. Agrégalo desde la ficha de una colmena.")
+                } else snackbar.showSnackbar("Código QR sin asociar a una colmena.")
             }
         } catch (e: CancellationException) { throw e }
-        catch (_: Exception) { snackbar.showSnackbar("No se pudo leer o guardar la colmena. Inténtalo de nuevo.") }
+        catch (_: Exception) { snackbar.showSnackbar("No se pudo leer o guardar el registro. Inténtalo de nuevo.") }
         finally { clear() }
     }
 
@@ -173,17 +180,21 @@ fun BeeApp(incoming: Scan?, clear: () -> Unit, scanQr: () -> Unit, hasNfc: Boole
         ) { padding ->
             Box(Modifier.padding(padding).padding(16.dp).fillMaxSize()) {
                 when {
-                    selected != null -> HiveDetail(selected, apiaries.firstOrNull { it.id == selected.apiaryId }?.name.orEmpty(), dao,
-                        onLinkNfc = { linkHiveId = selected.id; capturing = true }, canLinkNfc = hasNfc && nfcEnabled,
-                        onMessage = ::message)
+                    selected != null -> HiveDetail(selected, apiaries.firstOrNull { it.id == selected.apiaryId }?.name.orEmpty(), dao, onMessage = ::message)
                     selectedApiary != null -> ApiaryDetail(selectedApiary, hives.filter { it.apiaryId == selectedApiary.id },
                         onAddHive = { creatingApiaryId = selectedApiary.id; addHive = true },
-                        onOpenHive = { selectedId = it.id })
+                        onOpenHive = { selectedId = it.id },
+                        nfcTags = nfcTags.filter { it.apiaryId == selectedApiary.id }, canUseNfc = hasNfc && nfcEnabled,
+                        onLinkNfc = { linkApiaryId = selectedApiary.id; capturing = true },
+                        onRemoveTag = { tag -> scope.launch {
+                            try { dao.deleteApiaryNfcTag(tag) }
+                            catch (_: Exception) { snackbar.showSnackbar("No se pudo quitar la tarjeta.") }
+                        } })
                     else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         item { Text("Control de apiarios", style = MaterialTheme.typography.headlineSmall); Text("${apiaries.size} apiarios • ${hives.size} colmenas") }
                         item {
                             Button(onClick = scanQr, modifier = Modifier.fillMaxWidth()) { Text("Escanear QR") }
-                            Text(when { !hasNfc -> "Este teléfono no tiene NFC."; !nfcEnabled -> "Activa NFC en los ajustes del teléfono."; else -> "Acerca una tarjeta NFC asociada para abrir su colmena." })
+                            Text(when { !hasNfc -> "Este teléfono no tiene NFC."; !nfcEnabled -> "Activa NFC en los ajustes del teléfono."; else -> "Acerca una tarjeta NFC asociada para abrir su apiario." })
                         }
                         item { OutlinedButton(onClick = { addApiary = true }, modifier = Modifier.fillMaxWidth()) { Text("+ Apiario") } }
                         item { Text("Apiarios", style = MaterialTheme.typography.titleLarge) }
@@ -194,6 +205,7 @@ fun BeeApp(incoming: Scan?, clear: () -> Unit, scanQr: () -> Unit, hasNfc: Boole
                                     Text(apiary.name, style = MaterialTheme.typography.titleMedium)
                                     Text("${hives.count { it.apiaryId == apiary.id }} colmenas")
                                     if (apiary.location.isNotBlank()) Text(apiary.location)
+                                    if (nfcTags.any { it.apiaryId == apiary.id }) Text("Tarjeta NFC asociada")
                                 }
                             }
                         }
@@ -201,30 +213,34 @@ fun BeeApp(incoming: Scan?, clear: () -> Unit, scanQr: () -> Unit, hasNfc: Boole
                 }
             }
         }
-        if (addApiary) SimpleInput("Nuevo apiario", "Nombre del apiario", { addApiary = false }) { name ->
-            scope.launch {
-                try { dao.addApiary(Apiary(name = name)); addApiary = false }
-                catch (_: Exception) { snackbar.showSnackbar("No se pudo guardar el apiario.") }
-            }
-        }
-        val creatingApiary = apiaries.firstOrNull { it.id == creatingApiaryId }
-        if (addHive && creatingApiary != null) NewHiveDialog(creatingApiary, newTagId, capturing, hasNfc && nfcEnabled,
+        if (addApiary) NewApiaryDialog(newTagId, capturing, hasNfc && nfcEnabled,
             onCapture = { capturing = true }, onRemoveTag = { newTagId = null; capturing = false },
-            onCancel = ::closeNewHive, dao = dao, onSaved = ::closeNewHive)
-        if (capturing && linkHiveId != null) AlertDialog(
-            onDismissRequest = { capturing = false; linkHiveId = null },
+            onCancel = ::closeNewApiary, dao = dao, onSaved = ::closeNewApiary)
+        val creatingApiary = apiaries.firstOrNull { it.id == creatingApiaryId }
+        if (addHive && creatingApiary != null) NewHiveDialog(creatingApiary, onCancel = ::closeNewHive, dao = dao, onSaved = ::closeNewHive)
+        if (capturing && linkApiaryId != null) AlertDialog(
+            onDismissRequest = { capturing = false; linkApiaryId = null },
             title = { Text("Asociar tarjeta NFC") },
-            text = { Text("Acerca la tarjeta a la parte trasera del teléfono. La tarjeta quedará asociada a esta colmena.") },
-            confirmButton = {}, dismissButton = { TextButton(onClick = { capturing = false; linkHiveId = null }) { Text("Cancelar") } })
+            text = { Text("Acerca la tarjeta a la parte trasera del teléfono. La tarjeta quedará asociada a este apiario.") },
+            confirmButton = {}, dismissButton = { TextButton(onClick = { capturing = false; linkApiaryId = null }) { Text("Cancelar") } })
     }
 }
 
 @Composable
-fun ApiaryDetail(apiary: Apiary, hives: List<Hive>, onAddHive: () -> Unit, onOpenHive: (Hive) -> Unit) {
+fun ApiaryDetail(apiary: Apiary, hives: List<Hive>, onAddHive: () -> Unit, onOpenHive: (Hive) -> Unit,
+    nfcTags: List<ApiaryNfcTag>, canUseNfc: Boolean, onLinkNfc: () -> Unit, onRemoveTag: (ApiaryNfcTag) -> Unit) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             Text("Apiario: ${apiary.name}", style = MaterialTheme.typography.headlineSmall)
             Text("${hives.size} colmenas")
+        }
+        item {
+            Text(if (nfcTags.isEmpty()) "Sin tarjeta NFC" else "Tarjetas NFC: ${nfcTags.size}")
+            OutlinedButton(onClick = onLinkNfc, enabled = canUseNfc) { Text("Agregar tarjeta NFC") }
+            if (!canUseNfc) Text("Necesitas un teléfono con NFC activado para asociar tarjetas.")
+            nfcTags.forEachIndexed { index, tag ->
+                TextButton(onClick = { onRemoveTag(tag) }) { Text("Quitar tarjeta ${index + 1} (${tag.tagId})") }
+            }
         }
         item { Button(onClick = onAddHive, modifier = Modifier.fillMaxWidth()) { Text("+ Colmena") } }
         item { Text("Colmenas de este apiario", style = MaterialTheme.typography.titleLarge) }
@@ -235,7 +251,6 @@ fun ApiaryDetail(apiary: Apiary, hives: List<Hive>, onAddHive: () -> Unit, onOpe
                     if (hive.photoPath.isNotEmpty()) StoredPhoto(hive.photoPath, "Foto de ${hive.name}", Modifier.fillMaxWidth().height(150.dp))
                     Text(hive.name, style = MaterialTheme.typography.titleMedium)
                     Text("${hive.code} • ${hive.status}")
-                    if (hive.nfcTagId != null) Text("Tarjeta NFC asociada")
                 }
             }
         }
@@ -256,8 +271,7 @@ fun Choice(label: String, options: List<String>, selected: String, onSelect: (St
 }
 
 @Composable
-fun NewHiveDialog(apiary: Apiary, tagId: String?, capturing: Boolean, canUseNfc: Boolean,
-    onCapture: () -> Unit, onRemoveTag: () -> Unit, onCancel: () -> Unit, dao: BeeDao, onSaved: () -> Unit) {
+fun NewHiveDialog(apiary: Apiary, onCancel: () -> Unit, dao: BeeDao, onSaved: () -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
     var queen by rememberSaveable { mutableStateOf("") }
     var photos by rememberSaveable { mutableStateOf(emptyList<String>()) }
@@ -270,22 +284,17 @@ fun NewHiveDialog(apiary: Apiary, tagId: String?, capturing: Boolean, canUseNfc:
             OutlinedTextField(name, { name = it }, label = { Text("Nombre") }, enabled = !saving)
             OutlinedTextField(queen, { queen = it }, label = { Text("Tipo de reina") }, enabled = !saving)
             Text("Apiario: ${apiary.name}", style = MaterialTheme.typography.titleSmall)
-            Text(if (tagId == null) "Sin tarjeta NFC" else "Tarjeta NFC agregada")
-            OutlinedButton(onClick = onCapture, enabled = canUseNfc && !saving) { Text(if (capturing) "Acerca la tarjeta al teléfono…" else "Asociar tarjeta NFC") }
-            if (!canUseNfc) Text("Para asociar una tarjeta necesitas un teléfono con NFC activado.")
-            if (tagId != null || capturing) TextButton(onClick = onRemoveTag) { Text("Quitar / cancelar tarjeta") }
             PhotoEditor(photos, 1, { photos = it }, onBusy = { importing = it })
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }, confirmButton = {
-        Button(enabled = name.isNotBlank() && !saving && !importing && !capturing, onClick = {
+        Button(enabled = name.isNotBlank() && !saving && !importing, onClick = {
             saving = true
             scope.launch {
                 try {
-                    if (tagId != null && dao.hiveByNfcTagId(tagId) != null) error = "Esta tarjeta ya está asociada. Usa otra tarjeta."
-                    else {
+                    run {
                         dao.addHive(Hive(apiaryId = apiary.id, code = "COL-" + UUID.randomUUID().toString().take(8).uppercase(),
-                            name = name.trim(), queenType = queen.trim(), nfcTagId = tagId, photoPath = photos.firstOrNull().orEmpty()))
+                            name = name.trim(), queenType = queen.trim(), photoPath = photos.firstOrNull().orEmpty()))
                         onSaved()
                     }
                 } catch (_: Exception) { error = "No se pudo guardar la colmena. Inténtalo de nuevo." }
@@ -296,7 +305,7 @@ fun NewHiveDialog(apiary: Apiary, tagId: String?, capturing: Boolean, canUseNfc:
 }
 
 @Composable
-fun HiveDetail(hive: Hive, apiary: String, dao: BeeDao, onLinkNfc: () -> Unit, canLinkNfc: Boolean, onMessage: (String) -> Unit) {
+fun HiveDetail(hive: Hive, apiary: String, dao: BeeDao, onMessage: (String) -> Unit) {
     val inspections by remember(hive.id) { dao.inspections(hive.id) }.collectAsState(initial = emptyList())
     var add by rememberSaveable(hive.id) { mutableStateOf(false) }
     var editPhoto by rememberSaveable(hive.id) { mutableStateOf(false) }
@@ -310,8 +319,6 @@ fun HiveDetail(hive: Hive, apiary: String, dao: BeeDao, onLinkNfc: () -> Unit, c
                     Text("Código: ${hive.code}")
                     Text("Estado: ${hive.status}")
                     Text("Reina: ${hive.queenType.ifBlank { "Sin registrar" }} ${hive.queenYear}")
-                    Text(if (hive.nfcTagId == null) "Sin tarjeta NFC" else "Tarjeta NFC asociada")
-                    OutlinedButton(onClick = onLinkNfc, enabled = canLinkNfc) { Text(if (hive.nfcTagId == null) "Asociar tarjeta NFC" else "Cambiar tarjeta NFC") }
                     OutlinedButton(onClick = { editPhoto = true }) { Text("Agregar / cambiar foto") }
                 }
             }
@@ -390,9 +397,33 @@ fun EditHivePhotoDialog(hive: Hive, dao: BeeDao, onClose: () -> Unit, onMessage:
 }
 
 @Composable
-fun SimpleInput(title: String, label: String, cancel: () -> Unit, save: (String) -> Unit) {
-    var value by rememberSaveable { mutableStateOf("") }
-    AlertDialog(onDismissRequest = cancel, title = { Text(title) }, text = { OutlinedTextField(value, { value = it }, label = { Text(label) }) },
-        confirmButton = { Button(onClick = { save(value.trim()) }, enabled = value.isNotBlank()) { Text("Guardar") } },
-        dismissButton = { TextButton(onClick = cancel) { Text("Cancelar") } })
+fun NewApiaryDialog(tagId: String?, capturing: Boolean, canUseNfc: Boolean, onCapture: () -> Unit,
+    onRemoveTag: () -> Unit, onCancel: () -> Unit, dao: BeeDao, onSaved: () -> Unit) {
+    var name by rememberSaveable { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(onDismissRequest = { if (!saving) onCancel() }, title = { Text("Nuevo apiario") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(name, { name = it }, label = { Text("Nombre del apiario") }, enabled = !saving)
+            Text(if (tagId == null) "Sin tarjeta NFC" else "Tarjeta NFC agregada")
+            OutlinedButton(onClick = onCapture, enabled = canUseNfc && !saving) {
+                Text(if (capturing) "Acerca la tarjeta al teléfono…" else "Asociar tarjeta NFC")
+            }
+            if (!canUseNfc) Text("Para asociar una tarjeta necesitas un teléfono con NFC activado.")
+            if (tagId != null || capturing) TextButton(onClick = onRemoveTag, enabled = !saving) { Text("Quitar / cancelar tarjeta") }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
+    }, confirmButton = {
+        Button(enabled = name.isNotBlank() && !saving && !capturing, onClick = {
+            saving = true
+            scope.launch {
+                try {
+                    if (tagId != null && dao.apiaryByNfcTagId(tagId) != null) error = "Esta tarjeta ya pertenece a otro apiario. Usa otra tarjeta."
+                    else { dao.addApiaryWithTag(Apiary(name = name.trim()), tagId); onSaved() }
+                } catch (_: Exception) { error = "No se pudo guardar el apiario. Inténtalo de nuevo." }
+                finally { saving = false }
+            }
+        }) { Text(if (saving) "Guardando…" else "Guardar") }
+    }, dismissButton = { TextButton(onClick = onCancel, enabled = !saving) { Text("Cancelar") } })
 }

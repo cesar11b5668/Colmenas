@@ -4,10 +4,12 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.semantics.SemanticsActions
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
+import org.junit.Before
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -19,15 +21,22 @@ import org.robolectric.annotation.GraphicsMode
 class InspectionFlowTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
-    @Test fun nfcOpensAssociatedHiveAndInspectionPersistsSelections() {
+    @Before fun resetDatabase() {
+        val db = BeeDb.get(compose.activity)
+        runBlocking(Dispatchers.IO) { db.clearAllTables() }
+    }
+
+    @Test fun nfcOpensApiaryThenHiveInspectionPersistsSelections() {
         val dao = BeeDb.get(compose.activity).dao()
         val hiveId = runBlocking {
-            val apiaryId = dao.addApiary(Apiary(name = "El campo"))
-            dao.addHive(Hive(apiaryId = apiaryId, code = "COL-TEST", name = "Colmena NFC", nfcTagId = "0480FF"))
+            val apiaryId = dao.addApiaryWithTag(Apiary(name = "El campo"), "0480FF")
+            dao.addHive(Hive(apiaryId = apiaryId, code = "COL-TEST", name = "Colmena NFC"))
         }
         compose.runOnIdle { compose.activity.acceptScan(Scan(tagId = "0480FF")) }
-        compose.waitUntil(10_000) { compose.onAllNodesWithText("Nueva inspección").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("Colmenas de este apiario").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("Apiario: El campo").assertIsDisplayed()
+        compose.onNodeWithText("Nueva inspección").assertDoesNotExist()
+        compose.onNodeWithText("Colmena NFC").performScrollTo().performClick()
         compose.onNodeWithText("Nueva inspección").performClick()
         compose.onNodeWithText("Muerta").performScrollTo().performClick()
         compose.onNodeWithText("Oscura").performScrollTo().performClick()
