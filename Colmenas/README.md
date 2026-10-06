@@ -1,8 +1,8 @@
-# Colmenas 1.1
+# Colmenas 1.1.1
 Aplicación Android offline para gestión apícola.
 
 ## Incluido
-- Apiarios y colmenas, con selección del apiario al crear una colmena.
+- Lista de apiarios: abre uno para ver y agregar sus colmenas. Las colmenas nuevas se asignan automáticamente al apiario abierto.
 - Identificador único por colmena, foto de identificación y tarjeta NFC opcional.
 - Historial de inspecciones: salud (Buena, Regular, Muerta), color de miel (Clara, Oscura), fuerza de 1 (bajo) a 5 (fuerte), descripción y hasta seis fotos.
 - Escaneo QR y apertura automática de la ficha de la colmena al acercar una tarjeta NFC con la app abierta.
@@ -20,7 +20,7 @@ El APK se genera en `app/build/outputs/apk/debug/app-debug.apk`. Las pruebas cub
 
 ## Asociar una tarjeta NFC
 1. Activa NFC en el teléfono y abre la app.
-2. Al crear una colmena, selecciona su apiario y pulsa **Asociar tarjeta NFC**. También puedes hacerlo desde la ficha de una colmena existente.
+2. Abre el apiario, pulsa **+ Colmena** y después **Asociar tarjeta NFC**. También puedes hacerlo desde la ficha de una colmena existente.
 3. Acerca la tarjeta a la parte trasera del teléfono. Para una colmena nueva, pulsa **Guardar** después de que aparezca **Tarjeta NFC agregada**.
 4. En visitas posteriores, acerca la tarjeta con la app abierta: se abrirá la colmena y se mostrará su apiario.
 
